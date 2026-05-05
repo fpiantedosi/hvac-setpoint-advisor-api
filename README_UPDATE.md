@@ -1,44 +1,19 @@
-# Aggiornamento frontend + controllore
+# Aggiornamento 2026-05-05f
 
-Copia questi file nella stessa struttura del repository GitHub:
+Sostituire nel repository GitHub questi file:
 
-- `backend/app/config.py`
-- `backend/app/controller.py`
-- `backend/app/thermal_simulator.py`
-- `backend/static/index.html`
-- `backend/static/app.js`
-- `backend/static/styles.css`
+- backend/app/config.py
+- backend/app/controller.py
+- backend/static/index.html
+- backend/static/app.js
+- backend/static/styles.css
 
-Dopo il commit su `main`, Render avvierà automaticamente un nuovo deploy se Auto Deploy è attivo.
-In alternativa, su Render: `Manual Deploy -> Deploy latest commit`.
+Modifiche:
 
-Modifiche principali:
+1. Lo storico setpoint non viene più reso artificialmente piatto: il controllore ricostruito sulle ultime 72 ore pesa anche l'intensità di carico prevista dello slot 4h. In slot di basso carico tende a restare più vicino al nominale; in slot di carico più alto può suggerire +0,5 °C in cooling o -0,5 °C in heating.
+2. Non sono stati modificati timer, grafici temperatura, grafico energia con doppio asse o polling.
+3. Aggiunto grafico "Saving stimato per candidato" basato sui candidati setpoint correnti.
+4. Inserita una regola CSS di sicurezza che nasconde eventuali pannelli legacy di motivazione rimasti in cache o in vecchi HTML.
+5. Aggiornato cache-busting degli asset statici a `v=20260505f`.
 
-1. Grafico temperatura separa chiaramente:
-   - temperatura interna attuale;
-   - temperatura interna/ripresa prevista 6h in rosso;
-   - temperatura esterna prevista;
-   - setpoint consigliato.
-
-2. Baseline energia divisa in due grafici:
-   - gruppi frigo in kWh/h;
-   - caldaie in Smc/h.
-
-3. Tabella candidati più chiara:
-   - saving freddo;
-   - saving caldo;
-   - kWh gas equivalenti;
-   - energia score;
-   - penalità tecniche;
-   - score globale;
-   - esito.
-
-4. Controllore corretto:
-   - l'energy score non viene più normalizzato sul consumo totale centrale, ma sul massimo saving disponibile nella fase conservativa;
-   - questo evita che il contributo controllabile delle 11 UTA sia schiacciato dal carico complessivo della centrale;
-   - il setpoint raccomandato resta scelto sullo score globale, non sul solo saving.
-
-5. Simulatore termico:
-   - meno piatto;
-   - inizializzazione stimata da meteo quando non è disponibile temperatura interna reale;
-   - orizzonte previsione 6h.
+Dopo il commit su main, Render dovrebbe auto-deployare. Se la UI mostra ancora elementi vecchi, usare Ctrl+F5 o finestra anonima.
