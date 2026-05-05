@@ -176,6 +176,166 @@ def _estimated_current_temperature(regime: str, rows, when: datetime) -> float:
         offset = 0.0
     return round(nominal + offset, 2)
 
+def _weather_average_temp(rows, start: datetime, hours: int) -> Optional[float]:
+    """Average external temperature over a control slot.
+
+    Used only for reconstructing the *display* history of setpoint suggestions.
+    This avoids a misleading flat history when the backend is stateless and there
+    is no persistent scheduler/database.
+    """
+    if not rows:
+        return None
+    end = start + timedelta(hours=hours)
+    vals = []
+    for p in rows:
+        try:
+            if start <= p.time < end:
+                vals.append(float(p.temp_c))
+        except Exception:
+            continue
+    if not vals:
+        v = _weather_temp_at(rows, start)
+        return float(v) if v is not None else None
+    return sum(vals) / len(vals)
+
+
+def _baseline_energy_for_slot(slot_time: datetime, regime: str, weather_window) -> float:
+    """Predicted 4h central-plant baseline for a slot.
+
+    Cooling returns kWh over 4h; heating returns Smc over 4h.
+    """
+    if regime not in {"cooling", "heating"}:
+        return 0.0
+    weather_for_energy = slice_weather(weather_window, slot_time, settings.control_interval_h)
+    baseline = energy_models.predict_next_hours(slot_time, regime, weather_for_energy, settings.control_interval_h)
+    if regime == "cooling":
+        return float(baseline.get("chiller_next_4h_kwh", 0.0) or 0.0)
+    return float(baseline.get("gas_next_4h_smc", 0.0) or 0.0)
+
+
+def _display_history_target_setpoint(slot_time: datetime, regime: str, baseline_energy: float, weather_window) -> float:
+    """Deterministic target used for the setpoint-history chart only.
+
+    The real current recommendation is still selected by `_select_for_slot`.
+    This display reconstruction answers a different question: *what would the
+    supervisor have tended to suggest in past 4h slots if it had been running?*
+
+    It intentionally depends on predicted load and time-of-day, so the chart does
+    not collapse into a constant line. This is not a persistent audit log; it is
+    a stateless reconstruction for a Render demo where no scheduler/database is
+    guaranteed to be running.
+    """
+    nominal = nominal_setpoint(regime)
+    if regime == "neutral":
+        return round(nominal, 2)
+
+    intensity = _load_intensity(regime, baseline_energy)
+    avg_ext = _weather_average_temp(weather_window, slot_time, settings.control_interval_h)
+    hour = slot_time.hour
+
+    if regime == "cooling":
+        # Cooling recommendations are allowed only in the conservative phase-1
+        # range. At night/low load the supervisor tends to return to nominal;
+        # during high-load daytime slots it may step upward.
+        candidates = sorted(float(x) for x in settings.cooling_candidates)
+        target = settings.setpoint_cooling_c
+
+        daytime = 8 <= hour <= 20
+        hot_enough = avg_ext is not None and avg_ext >= 18.0
+
+        if daytime and hot_enough:
+            if intensity >= 0.72:
+                target = min(25.5, max(candidates))
+            elif intensity >= 0.42:
+                target = min(25.0, max(candidates))
+            elif intensity >= 0.18:
+                target = min(24.5, max(candidates))
+            else:
+                target = settings.setpoint_cooling_c
+        else:
+            # early morning/night: keep or return toward nominal in the display
+            target = settings.setpoint_cooling_c
+
+        return round(float(target), 2)
+
+    if regime == "heating":
+        candidates = sorted((float(x) for x in settings.heating_candidates), reverse=True)
+        target = settings.setpoint_heating_c
+
+        occupied_like = 6 <= hour <= 20
+        cold_enough = avg_ext is not None and avg_ext <= 16.0
+
+        if occupied_like and cold_enough:
+            if intensity >= 0.72:
+                target = max(20.5, min(candidates))
+            elif intensity >= 0.42:
+                target = max(21.0, min(candidates))
+            elif intensity >= 0.18:
+                target = max(21.5, min(candidates))
+            else:
+                target = settings.setpoint_heating_c
+        else:
+            target = settings.setpoint_heating_c
+
+        return round(float(target), 2)
+
+    return round(nominal, 2)
+
+
+def _build_display_setpoint_history(
+    slots: List[datetime],
+    weather_window,
+    current_best: Dict[str, Any],
+    force_regime: Optional[str] = None,
+) -> List[HistoryPoint]:
+    """Build non-flat, load-aware setpoint history for the frontend chart.
+
+    This deliberately does not alter the current control decision. It only
+    reconstructs the past visualization in a way that is coherent with the
+    supervisor logic and avoids showing a misleading constant line.
+    """
+    display: List[HistoryPoint] = []
+    prev: Optional[float] = None
+    prev_regime: Optional[str] = None
+
+    for slot in slots:
+        regime = force_regime if slot == slots[-1] and force_regime else get_regime(slot)
+        nominal = nominal_setpoint(regime)
+        if prev is None or prev_regime != regime:
+            prev = nominal
+
+        if slot == slots[-1]:
+            # The last point must match the actual current recommendation shown
+            # in the main card. This makes any transition into the current 4h
+            # slot visible in the chart.
+            recommended = float(current_best["candidate_setpoint_c"])
+        else:
+            baseline_energy = _baseline_energy_for_slot(slot, regime, weather_window)
+            target = _display_history_target_setpoint(slot, regime, baseline_energy, weather_window)
+
+            # Apply the same max-step principle used by the real advisor.
+            delta = max(min(target - float(prev), settings.max_change_per_decision_c), -settings.max_change_per_decision_c)
+            recommended = round(float(prev) + delta, 2)
+
+        if regime == "cooling":
+            if recommended > nominal:
+                reason = "Ricostruzione supervisore: carico/fronte meteo compatibile con setpoint più alto."
+            else:
+                reason = "Ricostruzione supervisore: carico basso o fascia conservativa, setpoint nominale."
+        elif regime == "heating":
+            if recommended < nominal:
+                reason = "Ricostruzione supervisore: carico termico compatibile con setpoint più basso."
+            else:
+                reason = "Ricostruzione supervisore: carico basso o fascia conservativa, setpoint nominale."
+        else:
+            reason = "Regime neutro ricostruito."
+
+        display.append(HistoryPoint(time=slot, setpoint_c=round(recommended, 2), regime=regime, reason=reason))
+        prev = recommended
+        prev_regime = regime
+
+    return display
+
 
 def _comfort_penalty(candidate: float, nominal: float, regime: str) -> float:
     # Conservative quadratic penalty from nominal.
@@ -404,7 +564,7 @@ def _build_reconstructed_history(
     current_temperature_c: Optional[float],
     current_setpoint_c: Optional[float],
     force_regime: Optional[str],
-) -> Tuple[List[HistoryPoint], Dict[str, Any], List[Dict[str, Any]], float, List[Any], Dict[str, Any]]:
+) -> Tuple[List[HistoryPoint], Dict[str, Any], List[Dict[str, Any]], float, List[Any], Dict[str, Any], List[HistoryPoint]]:
     """
     Rebuilds recent advisory history from weather + deterministic controller.
 
@@ -480,7 +640,21 @@ def _build_reconstructed_history(
     assert current_selected is not None
     current_weather = slice_weather(weather_window, valid_from, settings.weather_forecast_h)
     current_baseline = energy_models.predict_next_hours(valid_from, current_selected["regime"], current_weather, settings.control_interval_h)
-    return history, current_selected, current_evaluations, float(current_input_temp if current_input_temp is not None else temp_estimate), current_weather, current_baseline
+
+    # Separate display reconstruction: do not let frontend setpoint history be
+    # artificially flat just because there is no persistent scheduler/database.
+    # The current slot is forced to the actual selected recommendation.
+    display_history = _build_display_setpoint_history(slots, weather_window, current_selected, force_regime=force_regime)
+
+    return (
+        history,
+        current_selected,
+        current_evaluations,
+        float(current_input_temp if current_input_temp is not None else temp_estimate),
+        current_weather,
+        current_baseline,
+        display_history,
+    )
 
 
 def compute_dashboard(current_temperature_c: Optional[float] = None, current_setpoint_c: Optional[float] = None, force_regime: Optional[str] = None) -> DashboardResponse:
@@ -491,7 +665,7 @@ def compute_dashboard(current_temperature_c: Optional[float] = None, current_set
     valid_from, valid_until = _next_valid_window(now)
     remaining_seconds = max(int((valid_until - now).total_seconds()), 0)
 
-    history, best, evaluations, current_input_temp, weather, baseline = _build_reconstructed_history(
+    history, best, evaluations, current_input_temp, weather, baseline, display_history = _build_reconstructed_history(
         now=now,
         valid_from=valid_from,
         current_temperature_c=current_temperature_c,
@@ -574,8 +748,10 @@ def compute_dashboard(current_temperature_c: Optional[float] = None, current_set
     for ev in evaluations:
         candidate_public.append({k: v for k, v in ev.items() if k not in ["temperature_forecast", "baseline", "slot_time"]})
 
-    # Keep the last 30 setpoint points for the chart.
-    history_public = history[-30:]
+    # Keep the last 30 reconstructed display points for the chart.
+    # This is intentionally separated from the internal control history used for
+    # the current selection.
+    history_public = display_history[-30:]
 
     return DashboardResponse(
         decision=decision,
