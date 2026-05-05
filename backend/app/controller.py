@@ -51,6 +51,57 @@ def _normalize_positive(value: float, scale: float) -> float:
     return max(value / scale, 0.0)
 
 
+def _max_phase1_saving(regime: str) -> float:
+    """
+    Normalization scale for the energy score.
+
+    Important: the previous implementation normalized the saving against the
+    entire chiller/gas baseline. Since the controllable 11 UTA are only one
+    component of the central plant load, that made the energy score almost
+    invisible and the controller tended to hold the nominal setpoint. Here the
+    score is normalized against the maximum theoretical saving available inside
+    the conservative phase-1 candidate set.
+    """
+    if regime == "cooling":
+        max_candidate = max(settings.cooling_candidates)
+        return max(cooling_saving_kwh(max_candidate, settings.control_interval_h), 1.0)
+    if regime == "heating":
+        min_candidate = min(settings.heating_candidates)
+        return max(heating_saving_smc(min_candidate, settings.control_interval_h), 1.0)
+    return 1.0
+
+
+def _weather_temp_at(rows, when: datetime) -> Optional[float]:
+    if not rows:
+        return None
+    when_h = when.replace(minute=0, second=0, microsecond=0)
+    best = min(rows, key=lambda p: abs((p.time - when_h).total_seconds()))
+    try:
+        return float(best.temp_c)
+    except Exception:
+        return None
+
+
+def _estimated_current_temperature(regime: str, rows, when: datetime) -> float:
+    """
+    Fallback estimate for the current return/indoor temperature when no measured
+    value is available. This is not a measurement. It adds a small, bounded
+    weather-dependent offset to the seasonal nominal value so that the simulated
+    6h trend is not artificially flat.
+    """
+    nominal = nominal_setpoint(regime)
+    ext = _weather_temp_at(rows, when)
+    if ext is None or regime == "neutral":
+        return default_current_temperature(regime)
+    if regime == "cooling":
+        offset = max(min(0.07 * (ext - nominal), 1.2), -0.6)
+    elif regime == "heating":
+        offset = max(min(0.05 * (ext - nominal), 0.5), -1.0)
+    else:
+        offset = 0.0
+    return round(nominal + offset, 2)
+
+
 def _comfort_penalty(candidate: float, nominal: float, regime: str) -> float:
     # Conservative quadratic penalty from nominal.
     denom = 1.25 if regime in ["cooling", "heating"] else 1.0
@@ -147,7 +198,7 @@ def evaluate_candidate(
         baseline_energy = float(baseline["chiller_next_4h_kwh"])
         saving = max(cooling_saving_kwh(candidate, settings.control_interval_h), 0.0)
         optimized = max(baseline_energy - saving, 0.0)
-        energy_gain_score = _normalize_positive(saving, max(baseline_energy, 1.0))
+        energy_gain_score = _normalize_positive(saving, _max_phase1_saving(regime))
         saving_smc = None
         saving_kwh_gas = None
         unit = "kWh"
@@ -156,7 +207,7 @@ def evaluate_candidate(
         saving_smc = max(heating_saving_smc(candidate, settings.control_interval_h), 0.0)
         saving = saving_smc
         optimized = max(baseline_energy - saving_smc, 0.0)
-        energy_gain_score = _normalize_positive(saving_smc, max(baseline_energy, 1.0))
+        energy_gain_score = _normalize_positive(saving_smc, _max_phase1_saving(regime))
         saving_kwh_gas = smc_to_kwh_gas(saving_smc)
         unit = "Smc"
     else:
@@ -301,6 +352,7 @@ def _build_reconstructed_history(
     temp_estimate: Optional[float] = None
     current_selected: Optional[Dict[str, Any]] = None
     current_evaluations: List[Dict[str, Any]] = []
+    current_input_temp: Optional[float] = None
 
     for slot in slots:
         slot_regime = force_regime if slot == valid_from and force_regime else get_regime(slot)
@@ -312,9 +364,11 @@ def _build_reconstructed_history(
             previous_setpoint = float(current_setpoint_c)
 
         if temp_estimate is None or previous_regime != slot_regime:
-            temp_estimate = default_current_temperature(slot_regime)
+            temp_estimate = _estimated_current_temperature(slot_regime, weather_window, slot)
         if slot == valid_from and current_temperature_c is not None:
             temp_estimate = float(current_temperature_c)
+        if slot == valid_from:
+            current_input_temp = float(temp_estimate)
 
         selected, evaluations = _select_for_slot(
             slot,
@@ -347,7 +401,7 @@ def _build_reconstructed_history(
     assert current_selected is not None
     current_weather = slice_weather(weather_window, valid_from, settings.weather_forecast_h)
     current_baseline = energy_models.predict_next_hours(valid_from, current_selected["regime"], current_weather, settings.control_interval_h)
-    return history, current_selected, current_evaluations, float(temp_estimate), current_weather, current_baseline
+    return history, current_selected, current_evaluations, float(current_input_temp if current_input_temp is not None else temp_estimate), current_weather, current_baseline
 
 
 def compute_dashboard(current_temperature_c: Optional[float] = None, current_setpoint_c: Optional[float] = None, force_regime: Optional[str] = None) -> DashboardResponse:
@@ -355,7 +409,7 @@ def compute_dashboard(current_temperature_c: Optional[float] = None, current_set
     valid_from, valid_until = _next_valid_window(now)
     remaining_seconds = max(int((valid_until - now).total_seconds()), 0)
 
-    history, best, evaluations, _temp_chain, weather, baseline = _build_reconstructed_history(
+    history, best, evaluations, current_input_temp, weather, baseline = _build_reconstructed_history(
         now=now,
         valid_from=valid_from,
         current_temperature_c=current_temperature_c,
@@ -368,7 +422,7 @@ def compute_dashboard(current_temperature_c: Optional[float] = None, current_set
     previous = float(best["previous_setpoint_c"])
     recommended = float(best["candidate_setpoint_c"])
     temp_source = "operator_input" if current_temperature_c is not None else "simulated"
-    current_temp = float(current_temperature_c) if current_temperature_c is not None else default_current_temperature(regime)
+    current_temp = float(current_temperature_c) if current_temperature_c is not None else float(current_input_temp)
 
     if regime == "cooling":
         energy = EnergyBlock(

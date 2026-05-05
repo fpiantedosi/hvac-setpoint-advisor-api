@@ -55,22 +55,22 @@ class Settings:
     eta_caldaia: float = 0.90
 
     # Thermal simulator parameters
-    tau_env_h: float = 36.0
-    tau_hvac_h: float = 6.0
+    tau_env_h: float = 24.0
+    tau_hvac_h: float = 8.0
     default_current_temp_cooling_c: float = 24.0
     default_current_temp_heating_c: float = 22.0
     cooling_temperature_limit_c: float = 26.0
     heating_temperature_limit_c: float = 20.0
 
     # Technical score weights: dimensionless, not monetary
-    weight_energy: float = 0.75
-    weight_comfort: float = 1.45
-    weight_stability: float = 1.00
-    weight_process: float = 1.60
-    weight_edge: float = 2.10
-    weight_persistence: float = 1.20
+    weight_energy: float = 1.40
+    weight_comfort: float = 0.60
+    weight_stability: float = 0.10
+    weight_process: float = 1.80
+    weight_edge: float = 2.40
+    weight_persistence: float = 1.80
     weight_temperature_violation: float = 9.0
-    min_score_improvement_to_change: float = 0.025
+    min_score_improvement_to_change: float = 0.005
 
     # Conservative preferred region inside phase-1 limits
     # These values make the controller less eager to stay near phase-1 edges.
