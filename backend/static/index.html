@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HVAC Setpoint Advisor</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <div class="eyebrow">Supervisore energetico UTA</div>
+      <h1>HVAC Setpoint Advisor</h1>
+    </div>
+    <div class="top-actions">
+      <button id="desktopMode" class="mode-btn active">Desktop</button>
+      <button id="mobileMode" class="mode-btn">Mobile</button>
+      <button id="refreshBtn" class="refresh-btn">Aggiorna</button>
+    </div>
+  </header>
+
+  <main id="app" class="dashboard desktop-layout">
+    <section class="hero-card">
+      <div class="hero-left">
+        <div class="label">Setpoint consigliato</div>
+        <div class="setpoint-line"><span id="recommendedSetpoint">--</span><span class="unit">°C</span></div>
+        <div class="subline">Attuale: <b id="currentSetpoint">--</b> °C · Nominale: <b id="nominalSetpoint">--</b> °C</div>
+      </div>
+      <div class="hero-right">
+        <div class="timer-label">Setpoint valido per</div>
+        <div id="validTimer" class="timer">--:--:--</div>
+        <div id="validWindow" class="subline">--</div>
+      </div>
+    </section>
+
+    <section class="kpi-grid">
+      <article class="kpi-card">
+        <span class="label">Modalità</span>
+        <strong id="mode">--</strong>
+      </article>
+      <article class="kpi-card">
+        <span class="label">Saving freddo 4h</span>
+        <strong><span id="coolingSaving">--</span> kWh</strong>
+      </article>
+      <article class="kpi-card">
+        <span class="label">Saving caldo 4h</span>
+        <strong><span id="heatingSaving">--</span> Smc</strong>
+      </article>
+      <article class="kpi-card">
+        <span class="label">Confidenza</span>
+        <strong id="confidence">--</strong>
+      </article>
+    </section>
+
+    <section class="main-grid">
+      <article class="panel temp-panel">
+        <div class="panel-title">
+          <div>
+            <h2>Temperatura attuale e previsione 6h</h2>
+            <p id="temperatureSource">--</p>
+          </div>
+          <span class="pill" id="currentTemp">-- °C</span>
+        </div>
+        <canvas id="temperatureChart"></canvas>
+      </article>
+
+      <article class="panel setpoint-panel">
+        <div class="panel-title">
+          <div>
+            <h2>Storico setpoint proposti</h2>
+            <p>Ultime decisioni del supervisore ogni 4 ore</p>
+          </div>
+        </div>
+        <canvas id="setpointChart"></canvas>
+      </article>
+
+      <article class="panel energy-panel">
+        <div class="panel-title">
+          <div>
+            <h2>Baseline energia prossime ore</h2>
+            <p>Elaborazione backend da storico, calendario e meteo</p>
+          </div>
+        </div>
+        <canvas id="energyChart"></canvas>
+      </article>
+
+      <article class="panel reason-panel">
+        <h2>Motivazione raccomandazione</h2>
+        <p id="reason">--</p>
+        <div id="warning" class="warning hidden"></div>
+        <div class="score-grid">
+          <div><span>Energia</span><b id="scoreEnergy">--</b></div>
+          <div><span>Comfort</span><b id="scoreComfort">--</b></div>
+          <div><span>Stabilità</span><b id="scoreStability">--</b></div>
+          <div><span>Processo</span><b id="scoreProcess">--</b></div>
+          <div><span>Bordo</span><b id="scoreEdge">--</b></div>
+          <div><span>Score globale</span><b id="scoreGlobal">--</b></div>
+        </div>
+      </article>
+    </section>
+
+    <section class="panel full-width">
+      <div class="panel-title">
+        <div>
+          <h2>Valutazione candidati setpoint</h2>
+          <p>Confronto tecnico dei candidati ammessi nella fase conservativa</p>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Setpoint</th>
+              <th>Saving stimato</th>
+              <th>Unità</th>
+              <th>Energia score</th>
+              <th>Comfort</th>
+              <th>Stabilità</th>
+              <th>Processo</th>
+              <th>Temperatura</th>
+              <th>Score globale</th>
+            </tr>
+          </thead>
+          <tbody id="candidateTable"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span>Raccomandazione operatore · Nessun comando automatico BMS · Nessuna stima economica esposta</span>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
