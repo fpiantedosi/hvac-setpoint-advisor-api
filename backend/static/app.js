@@ -227,6 +227,20 @@ function upsertChart(id, config) {
   charts[id] = new Chart($(id), config);
 }
 
+
+function candidateSavingValue(row, mode) {
+  if (!row) return 0;
+  if (mode === "cooling") return Number(row.estimated_saving_energy || 0);
+  if (mode === "heating") return Number(row.estimated_saving_smc ?? row.estimated_saving_energy ?? 0);
+  return Number(row.estimated_saving_energy || 0);
+}
+
+function candidateSavingUnit(mode) {
+  if (mode === "cooling") return "kWh elettrici / 4h";
+  if (mode === "heating") return "Smc gas / 4h";
+  return "unità / 4h";
+}
+
 function renderCharts(data) {
   const d = data.decision;
   const forecast = d.temperature_forecast_6h || [];
@@ -288,6 +302,23 @@ function renderCharts(data) {
       }]
     },
     options: chartOptions("°C")
+  });
+
+  const candidates = data.candidate_evaluations || [];
+  const mode = d.mode || "";
+  upsertChart("savingChart", {
+    type: "bar",
+    data: {
+      labels: candidates.map(r => `${fmt(r.candidate_setpoint_c, 1)} °C`),
+      datasets: [{
+        label: `Saving stimato (${candidateSavingUnit(mode)})`,
+        data: candidates.map(r => candidateSavingValue(r, mode)),
+        backgroundColor: candidates.map(r => Math.abs(Number(r.candidate_setpoint_c) - Number(d.recommended_setpoint_c)) < 0.01 ? "rgba(217, 45, 32, 0.55)" : "rgba(31, 94, 255, 0.28)"),
+        borderColor: candidates.map(r => Math.abs(Number(r.candidate_setpoint_c) - Number(d.recommended_setpoint_c)) < 0.01 ? "#d92d20" : "#1f5eff"),
+        borderWidth: 1
+      }]
+    },
+    options: chartOptions(candidateSavingUnit(mode))
   });
 
   const energy = data.energy_series || [];

@@ -194,3 +194,16 @@ body.loading .timer {
 .mobile-layout .refresh-state {
   text-align: left;
 }
+
+/* Update 2026-05-05f: force-remove legacy motivation panels and style saving chart */
+.reason-panel,
+.motivation-panel,
+#reasonPanel,
+#motivationPanel,
+#recommendationReasonPanel,
+[data-panel="motivation"] {
+  display: none !important;
+}
+.saving-panel canvas#savingChart {
+  max-height: 285px;
+}
