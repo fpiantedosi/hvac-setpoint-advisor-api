@@ -62,6 +62,15 @@ class Settings:
     cooling_temperature_limit_c: float = 26.0
     heating_temperature_limit_c: float = 20.0
 
+    # Load-intensity thresholds used by the controller.
+    # The energy score is activated more strongly when the predicted central plant
+    # load is materially high. This avoids flat, always-at-limit histories and makes
+    # the reconstructed 4h recommendations react to weather/load conditions.
+    cooling_load_low_4h_kwh: float = 2200.0
+    cooling_load_high_4h_kwh: float = 6200.0
+    heating_load_low_4h_smc: float = 350.0
+    heating_load_high_4h_smc: float = 1300.0
+
     # Technical score weights: dimensionless, not monetary
     weight_energy: float = 1.40
     weight_comfort: float = 0.60

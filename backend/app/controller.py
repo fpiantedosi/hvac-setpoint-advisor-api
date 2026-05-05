@@ -20,6 +20,46 @@ from .schemas import (
     ScoreBlock,
 )
 
+def _ensure_setting(name: str, value):
+    """Backward-compatible defaults when Render deploys a controller newer than config.py."""
+    if not hasattr(settings, name):
+        try:
+            object.__setattr__(settings, name, value)
+        except Exception:
+            pass
+
+# Safety defaults. They prevent /api/dashboard from failing if config.py in the
+# deployed repo is older than controller.py. Replace config.py anyway.
+for _name, _value in {
+    "cooling_load_low_4h_kwh": 2200.0,
+    "cooling_load_high_4h_kwh": 6200.0,
+    "heating_load_low_4h_smc": 350.0,
+    "heating_load_high_4h_smc": 1300.0,
+    "weight_energy": 1.40,
+    "weight_comfort": 0.60,
+    "weight_stability": 0.10,
+    "weight_process": 1.80,
+    "weight_edge": 2.40,
+    "weight_persistence": 1.80,
+    "weight_temperature_violation": 9.0,
+    "min_score_improvement_to_change": 0.005,
+    "cooling_preferred_max_c": 25.0,
+    "heating_preferred_min_c": 21.0,
+    "setpoint_history_lookback_h": 72,
+    "thermal_forecast_h": 6,
+    "weather_forecast_h": 6,
+    "max_change_per_decision_c": 0.5,
+    "control_interval_h": 4,
+    "cooling_temperature_limit_c": 26.0,
+    "heating_temperature_limit_c": 20.0,
+    "cooling_band": (21.0, 27.0),
+    "heating_band": (19.0, 25.0),
+    "setpoint_step_c": 0.5,
+    "cooling_candidates": (24.0, 24.5, 25.0, 25.5),
+    "heating_candidates": (22.0, 21.5, 21.0, 20.5),
+}.items():
+    _ensure_setting(_name, _value)
+
 
 def _floor_control_window(dt: datetime) -> datetime:
     base_hour = (dt.hour // settings.control_interval_h) * settings.control_interval_h
