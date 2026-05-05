@@ -2,6 +2,11 @@ let dashboardData = null;
 let remainingSeconds = 0;
 let timerHandle = null;
 let topOfHourHandle = null;
+let validityRefreshHandle = null;
+let periodicRefreshHandle = null;
+let expiryRetryHandle = null;
+let isLoadingDashboard = false;
+let lastDecisionKey = null;
 let charts = {};
 
 const $ = (id) => document.getElementById(id);
@@ -11,9 +16,15 @@ function fmt(n, digits = 1) {
   return Number(n).toFixed(digits);
 }
 
-function fmtDate(s) {
-  if (!s) return "--";
+function parseDate(s) {
+  if (!s) return null;
   const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function fmtDate(s) {
+  const d = parseDate(s);
+  if (!d) return "--";
   return d.toLocaleString("it-IT", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
@@ -25,13 +36,99 @@ function fmtTimeLeft(sec) {
   return `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
 }
 
-function startTimer() {
+function secondsUntil(dateString, fallbackSeconds = 0) {
+  const d = parseDate(dateString);
+  if (!d) return Math.max(0, Number(fallbackSeconds || 0));
+  return Math.max(0, Math.ceil((d.getTime() - Date.now()) / 1000));
+}
+
+function decisionKey(data) {
+  const d = data?.decision || {};
+  return `${d.valid_from || ""}|${d.valid_until || ""}|${d.recommended_setpoint_c || ""}|${d.mode || ""}`;
+}
+
+function setLoadingState(isLoading) {
+  document.body.classList.toggle("loading", isLoading);
+  const btn = $("refreshBtn");
+  if (btn) btn.textContent = isLoading ? "Aggiorno..." : "Aggiorna";
+}
+
+async function loadDashboard(reason = "manual") {
+  if (isLoadingDashboard) return dashboardData;
+  isLoadingDashboard = true;
+  setLoadingState(true);
+  try {
+    const res = await fetch(`/api/dashboard?_=${Date.now()}&reason=${encodeURIComponent(reason)}`, {
+      cache: "no-store",
+      headers: { "Cache-Control": "no-cache" }
+    });
+    if (!res.ok) throw new Error(`Errore backend: HTTP ${res.status}`);
+    const data = await res.json();
+    dashboardData = data;
+    updateUI(data);
+    return data;
+  } catch (err) {
+    console.error(err);
+    showRefreshWarning("Backend non raggiungibile. Ritento automaticamente.");
+    throw err;
+  } finally {
+    isLoadingDashboard = false;
+    setLoadingState(false);
+  }
+}
+
+function showRefreshWarning(text) {
+  const el = $("refreshState");
+  if (!el) return;
+  el.textContent = text || "";
+  el.classList.toggle("hidden", !text);
+}
+
+function scheduleValidityRefresh(validUntil) {
+  if (validityRefreshHandle) clearTimeout(validityRefreshHandle);
+  const d = parseDate(validUntil);
+  if (!d) return;
+  const delay = Math.max(1000, d.getTime() - Date.now() + 3000);
+  validityRefreshHandle = setTimeout(() => {
+    refreshAfterExpiry();
+  }, delay);
+}
+
+function refreshAfterExpiry(attempt = 1) {
+  if (expiryRetryHandle) clearTimeout(expiryRetryHandle);
+  showRefreshWarning("Finestra scaduta: aggiorno la raccomandazione...");
+  loadDashboard("validity_expired")
+    .then((data) => {
+      const sec = secondsUntil(data?.decision?.valid_until, data?.decision?.remaining_seconds);
+      if (sec <= 2 && attempt < 12) {
+        // Se siamo esattamente sul confine della finestra, il backend/meteo può
+        // rispondere ancora con lo slot precedente per pochi secondi. Ritento.
+        expiryRetryHandle = setTimeout(() => refreshAfterExpiry(attempt + 1), 5000);
+      } else {
+        showRefreshWarning("");
+      }
+    })
+    .catch(() => {
+      if (attempt < 12) expiryRetryHandle = setTimeout(() => refreshAfterExpiry(attempt + 1), 10000);
+    });
+}
+
+function startTimer(data) {
   if (timerHandle) clearInterval(timerHandle);
+  const d = data.decision;
+  remainingSeconds = secondsUntil(d.valid_until, d.remaining_seconds);
   $("validTimer").textContent = fmtTimeLeft(remainingSeconds);
+  scheduleValidityRefresh(d.valid_until);
+
   timerHandle = setInterval(() => {
-    remainingSeconds -= 1;
+    remainingSeconds = secondsUntil(d.valid_until, remainingSeconds - 1);
     $("validTimer").textContent = fmtTimeLeft(remainingSeconds);
-    if (remainingSeconds <= 0) loadDashboard();
+    if (remainingSeconds <= 0) {
+      clearInterval(timerHandle);
+      timerHandle = null;
+      $("validTimer").textContent = "00:00:00";
+      refreshAfterExpiry();
+    }
   }, 1000);
 }
 
@@ -42,48 +139,44 @@ function scheduleTopOfHourRefresh() {
   next.setHours(now.getHours() + 1, 0, 5, 0);
   const delay = Math.max(10_000, next.getTime() - now.getTime());
   topOfHourHandle = setTimeout(() => {
-    loadDashboard().catch(console.error);
+    loadDashboard("top_of_hour").catch(console.error);
     scheduleTopOfHourRefresh();
   }, delay);
 }
 
-async function loadDashboard() {
-  const res = await fetch(`/api/dashboard?_=${Date.now()}`, { cache: "no-store" });
-  if (!res.ok) throw new Error("Errore backend");
-  dashboardData = await res.json();
-  updateUI(dashboardData);
+function startPeriodicPolling() {
+  if (periodicRefreshHandle) clearInterval(periodicRefreshHandle);
+  // Polling leggero: mantiene più dispositivi sincronizzati e aggiorna i grafici
+  // senza attendere la chiusura/riapertura della pagina.
+  periodicRefreshHandle = setInterval(() => {
+    loadDashboard("periodic_poll").catch(console.error);
+  }, 30000);
 }
 
 function updateUI(data) {
   const d = data.decision;
-  remainingSeconds = d.remaining_seconds;
+  const newKey = decisionKey(data);
+  const changed = lastDecisionKey && lastDecisionKey !== newKey;
+  lastDecisionKey = newKey;
+
+  remainingSeconds = secondsUntil(d.valid_until, d.remaining_seconds);
   $("recommendedSetpoint").textContent = fmt(d.recommended_setpoint_c, 1);
   $("currentSetpoint").textContent = fmt(d.current_setpoint_c, 1);
   $("nominalSetpoint").textContent = fmt(d.nominal_setpoint_c, 1);
-  $("mode").textContent = d.mode.toUpperCase();
-  $("confidence").textContent = d.confidence.toUpperCase();
+  $("mode").textContent = String(d.mode || "--").toUpperCase();
+  $("confidence").textContent = String(d.confidence || "--").toUpperCase();
   $("validWindow").textContent = `${fmtDate(d.valid_from)} → ${fmtDate(d.valid_until)}`;
-  $("coolingSaving").textContent = fmt(d.energy.estimated_saving_next_4h_kwh, 1);
-  $("heatingSaving").textContent = fmt(d.gas.estimated_saving_next_4h_smc, 1);
+  $("coolingSaving").textContent = fmt(d.energy?.estimated_saving_next_4h_kwh, 1);
+  $("heatingSaving").textContent = fmt(d.gas?.estimated_saving_next_4h_smc, 1);
   $("currentTemp").textContent = `${fmt(d.current_temperature_c, 1)} °C`;
   $("temperatureSource").textContent = `Sorgente temperatura: ${d.temperature_source}`;
-  $("reason").textContent = d.reason;
-  if (d.warning) {
-    $("warning").textContent = d.warning;
-    $("warning").classList.remove("hidden");
-  } else {
-    $("warning").classList.add("hidden");
-  }
-  $("scoreEnergy").textContent = fmt(d.scores.energy_score, 3);
-  $("scoreComfort").textContent = fmt(d.scores.comfort_penalty, 3);
-  $("scoreStability").textContent = fmt(d.scores.stability_penalty, 3);
-  $("scoreProcess").textContent = fmt(d.scores.process_penalty, 3);
-  $("scoreEdge").textContent = fmt(d.scores.edge_penalty, 3);
-  $("scoreGlobal").textContent = fmt(d.scores.global_score, 3);
+
+  if (changed) showRefreshWarning("Nuovo slot di controllo caricato.");
+  else showRefreshWarning("");
 
   renderCharts(data);
   renderCandidateTable(data);
-  startTimer();
+  startTimer(data);
 }
 
 function chartOptions(yTitle) {
@@ -99,8 +192,38 @@ function chartOptions(yTitle) {
   };
 }
 
+function dualAxisEnergyOptions() {
+  return {
+    responsive: true,
+    animation: false,
+    maintainAspectRatio: false,
+    interaction: { mode: "index", intersect: false },
+    plugins: { legend: { display: true, labels: { boxWidth: 14 } } },
+    scales: {
+      x: { ticks: { maxRotation: 0, autoSkip: true } },
+      y: {
+        type: "linear",
+        position: "left",
+        title: { display: true, text: "Gruppi frigo [kWh/h]" },
+        grid: { drawOnChartArea: true }
+      },
+      y1: {
+        type: "linear",
+        position: "right",
+        title: { display: true, text: "Caldaie [Smc/h]" },
+        grid: { drawOnChartArea: false }
+      }
+    }
+  };
+}
+
 function upsertChart(id, config) {
-  if (charts[id]) charts[id].destroy();
+  if (charts[id]) {
+    charts[id].data = config.data;
+    charts[id].options = config.options;
+    charts[id].update("none");
+    return;
+  }
   charts[id] = new Chart($(id), config);
 }
 
@@ -112,7 +235,6 @@ function renderCharts(data) {
   const actualInternal = [d.current_temperature_c, ...forecast.map(() => null)];
   const predictedInternal = [d.current_temperature_c, ...forecast.map(p => p.predicted_c)];
   const externalData = [forecast.length ? forecast[0].external_c : null, ...forecast.map(p => p.external_c)];
-  const spData = tLabels.map(() => d.recommended_setpoint_c);
 
   upsertChart("temperatureChart", {
     type: "line",
@@ -120,11 +242,11 @@ function renderCharts(data) {
       labels: tLabels,
       datasets: [
         {
-          label: "Temperatura interna attuale",
+          label: "Temperatura interna attuale/simulata ora",
           data: actualInternal,
           borderColor: "#1f5eff",
           backgroundColor: "#1f5eff",
-          pointRadius: 5,
+          pointRadius: 6,
           showLine: false
         },
         {
@@ -135,15 +257,6 @@ function renderCharts(data) {
           tension: .25,
           pointRadius: 3,
           borderWidth: 3
-        },
-        {
-          label: "Setpoint consigliato",
-          data: spData,
-          borderColor: "#126f48",
-          backgroundColor: "#126f48",
-          borderDash: [6, 4],
-          pointRadius: 0,
-          borderWidth: 2
         },
         {
           label: "Temperatura esterna prevista",
@@ -178,36 +291,43 @@ function renderCharts(data) {
   });
 
   const energy = data.energy_series || [];
-  upsertChart("chillerChart", {
+  upsertChart("energyChart", {
     type: "bar",
     data: {
       labels: energy.map(p => fmtDate(p.time)),
-      datasets: [{
-        label: "Frigo kWh/h",
-        data: energy.map(p => p.chiller_kwh_h),
-        backgroundColor: "#1f5eff"
-      }]
+      datasets: [
+        {
+          type: "bar",
+          label: "Gruppi frigo [kWh/h]",
+          data: energy.map(p => p.chiller_kwh_h),
+          backgroundColor: "rgba(31, 94, 255, 0.38)",
+          borderColor: "#1f5eff",
+          borderWidth: 1,
+          yAxisID: "y"
+        },
+        {
+          type: "line",
+          label: "Caldaie [Smc/h]",
+          data: energy.map(p => p.gas_smc_h),
+          borderColor: "#9a5a00",
+          backgroundColor: "#9a5a00",
+          pointRadius: 3,
+          tension: .25,
+          yAxisID: "y1"
+        }
+      ]
     },
-    options: chartOptions("kWh/h")
-  });
-
-  upsertChart("gasChart", {
-    type: "bar",
-    data: {
-      labels: energy.map(p => fmtDate(p.time)),
-      datasets: [{
-        label: "Gas Smc/h",
-        data: energy.map(p => p.gas_smc_h),
-        backgroundColor: "#9a5a00"
-      }]
-    },
-    options: chartOptions("Smc/h")
+    options: dualAxisEnergyOptions()
   });
 }
 
 function renderCandidateTable(data) {
   const rec = data.decision.recommended_setpoint_c;
   const rows = data.candidate_evaluations || [];
+  if (!rows.length) {
+    $("candidateTable").innerHTML = `<tr><td colspan="8">Nessun candidato disponibile.</td></tr>`;
+    return;
+  }
   const maxEnergy = Math.max(...rows.map(r => Number(r.energy_score || 0)));
 
   const html = rows.map(r => {
@@ -254,15 +374,14 @@ function setMode(mode) {
   setTimeout(() => dashboardData && renderCharts(dashboardData), 100);
 }
 
-$("refreshBtn").addEventListener("click", loadDashboard);
+$("refreshBtn").addEventListener("click", () => loadDashboard("manual_refresh").catch(console.error));
 $("desktopMode").addEventListener("click", () => setMode("desktop"));
 $("mobileMode").addEventListener("click", () => setMode("mobile"));
 
-loadDashboard().catch(err => {
+loadDashboard("initial_load").catch(err => {
   console.error(err);
-  $("reason").textContent = "Impossibile contattare il backend. Verificare il servizio FastAPI.";
+  alert("Impossibile contattare il backend. Verificare il servizio FastAPI.");
 });
 
-// Polling leggero per mantenere grafici e raccomandazione sincronizzati tra dispositivi.
-setInterval(() => loadDashboard().catch(console.error), 60000);
+startPeriodicPolling();
 scheduleTopOfHourRefresh();

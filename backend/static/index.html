@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>HVAC Setpoint Advisor</title>
-  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="/static/styles.css?v=20260505d" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
@@ -31,6 +31,7 @@
         <div class="timer-label">Setpoint valido per</div>
         <div id="validTimer" class="timer">--:--:--</div>
         <div id="validWindow" class="subline">--</div>
+        <div id="refreshState" class="refresh-state hidden"></div>
       </div>
     </section>
 
@@ -63,7 +64,7 @@
           <span class="pill" id="currentTemp">-- °C</span>
         </div>
         <canvas id="temperatureChart"></canvas>
-        <div class="chart-note">Linea rossa: temperatura interna/ripresa prevista dal simulatore termico. Linea grigia: temperatura esterna prevista.</div>
+        <div class="chart-note">Linea rossa: temperatura interna/ripresa prevista dal simulatore termico. Linea grigia: temperatura esterna prevista. Il setpoint consigliato non viene disegnato come curva di temperatura.</div>
       </article>
 
       <article class="panel setpoint-panel">
@@ -80,36 +81,11 @@
         <div class="panel-title">
           <div>
             <h2>Baseline energia prossime ore</h2>
-            <p>Grafici separati: kWh elettrici frigo e Smc gas non sono sulla stessa scala</p>
+            <p>Asse sinistro: gruppi frigo [kWh/h]. Asse destro: caldaie [Smc/h].</p>
           </div>
         </div>
-        <div class="split-charts">
-          <div>
-            <h3>Gruppi frigo · kWh/h</h3>
-            <canvas id="chillerChart"></canvas>
-          </div>
-          <div>
-            <h3>Caldaie · Smc/h</h3>
-            <canvas id="gasChart"></canvas>
-          </div>
-        </div>
-      </article>
-
-      <article class="panel reason-panel">
-        <h2>Motivazione raccomandazione</h2>
-        <p id="reason">--</p>
-        <div id="warning" class="warning hidden"></div>
-        <div class="score-explainer">
-          Il setpoint raccomandato non coincide necessariamente con il massimo saving: vince il candidato con <b>score globale più basso</b>, dopo penalità comfort, stabilità, processo e temperatura.
-        </div>
-        <div class="score-grid">
-          <div><span>Energia</span><b id="scoreEnergy">--</b></div>
-          <div><span>Comfort</span><b id="scoreComfort">--</b></div>
-          <div><span>Stabilità</span><b id="scoreStability">--</b></div>
-          <div><span>Processo</span><b id="scoreProcess">--</b></div>
-          <div><span>Bordo</span><b id="scoreEdge">--</b></div>
-          <div><span>Score globale</span><b id="scoreGlobal">--</b></div>
-        </div>
+        <canvas id="energyChart"></canvas>
+        <div class="chart-note">Le due grandezze hanno unità diverse: il grafico usa due assi verticali separati.</div>
       </article>
     </section>
 
@@ -117,7 +93,7 @@
       <div class="panel-title">
         <div>
           <h2>Valutazione candidati setpoint</h2>
-          <p>Energia score: più alto è meglio. Score globale: più basso è meglio.</p>
+          <p>Energia score: più alto è meglio. Score globale: più basso è meglio. Il candidato raccomandato bilancia saving e vincoli tecnici.</p>
         </div>
       </div>
       <div class="table-wrap">
@@ -144,6 +120,6 @@
     <span>Raccomandazione operatore · Nessun comando automatico BMS · Nessuna stima economica esposta</span>
   </footer>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=20260505d"></script>
 </body>
 </html>

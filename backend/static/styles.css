@@ -165,3 +165,32 @@ tr.energy-best:not(.selected) td:last-child {
 @media (max-width: 900px) {
   .split-charts { grid-template-columns: 1fr; }
 }
+
+/* Update 2026-05-05c: single dual-axis energy chart and removed motivation panel */
+.energy-panel canvas#energyChart {
+  max-height: 280px;
+}
+
+.temp-panel canvas#temperatureChart,
+.setpoint-panel canvas#setpointChart {
+  max-height: 285px;
+}
+
+/* Update 2026-05-05d: automatic refresh across 4h validity boundary */
+.refresh-state {
+  margin-top: 8px;
+  text-align: right;
+  color: var(--warn);
+  font-size: 12px;
+  font-weight: 800;
+}
+body.loading .refresh-btn {
+  opacity: .75;
+  pointer-events: none;
+}
+body.loading .timer {
+  color: #9a5a00;
+}
+.mobile-layout .refresh-state {
+  text-align: left;
+}
