@@ -52,6 +52,40 @@ def _normalize_positive(value: float, scale: float) -> float:
     return max(value / scale, 0.0)
 
 
+
+
+def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
+    return max(low, min(high, value))
+
+
+def _load_intensity(regime: str, baseline_energy: float) -> float:
+    """
+    Dimensionless load factor in [0.15, 1.15].
+
+    The setpoint advisor must not behave as if every 4h slot had the same
+    opportunity for savings. In a stateless deployment the setpoint history is
+    reconstructed on demand; if the energy term is independent of the predicted
+    load, the chart can become artificially flat. This factor makes the advisory
+    more conservative during low-load slots and more willing to move by 0.5 °C
+    during high-load slots, while still respecting comfort/process/stability
+    penalties.
+    """
+    if regime == "cooling":
+        low = settings.cooling_load_low_4h_kwh
+        high = settings.cooling_load_high_4h_kwh
+    elif regime == "heating":
+        low = settings.heating_load_low_4h_smc
+        high = settings.heating_load_high_4h_smc
+    else:
+        return 0.0
+    if high <= low:
+        return 1.0
+    x = (float(baseline_energy) - low) / (high - low)
+    # 0.15 avoids a dead controller in moderate conditions; 1.15 allows
+    # the history to show stronger action under clear peak-load conditions.
+    return round(0.15 + 1.0 * _clamp(x), 4)
+
+
 def _max_phase1_saving(regime: str) -> float:
     """
     Normalization scale for the energy score.
@@ -199,7 +233,8 @@ def evaluate_candidate(
         baseline_energy = float(baseline["chiller_next_4h_kwh"])
         saving = max(cooling_saving_kwh(candidate, settings.control_interval_h), 0.0)
         optimized = max(baseline_energy - saving, 0.0)
-        energy_gain_score = _normalize_positive(saving, _max_phase1_saving(regime))
+        load_intensity = _load_intensity(regime, baseline_energy)
+        energy_gain_score = _normalize_positive(saving, _max_phase1_saving(regime)) * load_intensity
         saving_smc = None
         saving_kwh_gas = None
         unit = "kWh"
@@ -208,7 +243,8 @@ def evaluate_candidate(
         saving_smc = max(heating_saving_smc(candidate, settings.control_interval_h), 0.0)
         saving = saving_smc
         optimized = max(baseline_energy - saving_smc, 0.0)
-        energy_gain_score = _normalize_positive(saving_smc, _max_phase1_saving(regime))
+        load_intensity = _load_intensity(regime, baseline_energy)
+        energy_gain_score = _normalize_positive(saving_smc, _max_phase1_saving(regime)) * load_intensity
         saving_kwh_gas = smc_to_kwh_gas(saving_smc)
         unit = "Smc"
     else:
@@ -219,6 +255,7 @@ def evaluate_candidate(
         saving_smc = None
         saving_kwh_gas = None
         unit = "none"
+        load_intensity = 0.0
 
     comfort = _comfort_penalty(candidate, nominal, regime)
     stability = _stability_penalty(candidate, previous_setpoint)
@@ -249,6 +286,7 @@ def evaluate_candidate(
         "estimated_saving_kwh_gas": round(saving_kwh_gas, 2) if saving_kwh_gas is not None else None,
         "saving_unit": unit,
         "energy_score": round(energy_gain_score, 4),
+        "load_intensity": round(load_intensity, 4),
         "comfort_penalty": round(comfort, 4),
         "stability_penalty": round(stability, 4),
         "process_penalty": round(process, 4),
