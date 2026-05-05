@@ -63,13 +63,14 @@
           <span class="pill" id="currentTemp">-- °C</span>
         </div>
         <canvas id="temperatureChart"></canvas>
+        <div class="chart-note">Linea rossa: temperatura interna/ripresa prevista dal simulatore termico. Linea grigia: temperatura esterna prevista.</div>
       </article>
 
       <article class="panel setpoint-panel">
         <div class="panel-title">
           <div>
             <h2>Storico setpoint proposti</h2>
-            <p>Ultime decisioni del supervisore ogni 4 ore</p>
+            <p>Ultime decisioni ricostruite dal supervisore ogni 4 ore</p>
           </div>
         </div>
         <canvas id="setpointChart"></canvas>
@@ -79,16 +80,28 @@
         <div class="panel-title">
           <div>
             <h2>Baseline energia prossime ore</h2>
-            <p>Elaborazione backend da storico, calendario e meteo</p>
+            <p>Grafici separati: kWh elettrici frigo e Smc gas non sono sulla stessa scala</p>
           </div>
         </div>
-        <canvas id="energyChart"></canvas>
+        <div class="split-charts">
+          <div>
+            <h3>Gruppi frigo · kWh/h</h3>
+            <canvas id="chillerChart"></canvas>
+          </div>
+          <div>
+            <h3>Caldaie · Smc/h</h3>
+            <canvas id="gasChart"></canvas>
+          </div>
+        </div>
       </article>
 
       <article class="panel reason-panel">
         <h2>Motivazione raccomandazione</h2>
         <p id="reason">--</p>
         <div id="warning" class="warning hidden"></div>
+        <div class="score-explainer">
+          Il setpoint raccomandato non coincide necessariamente con il massimo saving: vince il candidato con <b>score globale più basso</b>, dopo penalità comfort, stabilità, processo e temperatura.
+        </div>
         <div class="score-grid">
           <div><span>Energia</span><b id="scoreEnergy">--</b></div>
           <div><span>Comfort</span><b id="scoreComfort">--</b></div>
@@ -104,7 +117,7 @@
       <div class="panel-title">
         <div>
           <h2>Valutazione candidati setpoint</h2>
-          <p>Confronto tecnico dei candidati ammessi nella fase conservativa</p>
+          <p>Energia score: più alto è meglio. Score globale: più basso è meglio.</p>
         </div>
       </div>
       <div class="table-wrap">
@@ -112,14 +125,13 @@
           <thead>
             <tr>
               <th>Setpoint</th>
-              <th>Saving stimato</th>
-              <th>Unità</th>
+              <th>Saving freddo</th>
+              <th>Saving caldo</th>
+              <th>kWh gas equiv.</th>
               <th>Energia score</th>
-              <th>Comfort</th>
-              <th>Stabilità</th>
-              <th>Processo</th>
-              <th>Temperatura</th>
+              <th>Penalità tecniche</th>
               <th>Score globale</th>
+              <th>Esito</th>
             </tr>
           </thead>
           <tbody id="candidateTable"></tbody>
