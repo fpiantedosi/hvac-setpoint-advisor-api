@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional, Tuple
 import math
 
@@ -405,7 +406,10 @@ def _build_reconstructed_history(
 
 
 def compute_dashboard(current_temperature_c: Optional[float] = None, current_setpoint_c: Optional[float] = None, force_regime: Optional[str] = None) -> DashboardResponse:
-    now = datetime.now().replace(microsecond=0)
+    # Render servers usually run in UTC. The control windows, however, must be
+    # aligned with the plant local time. We compute a local naive datetime so it
+    # remains compatible with the Open-Meteo local timestamps used elsewhere.
+    now = datetime.now(ZoneInfo(settings.timezone)).replace(tzinfo=None, microsecond=0)
     valid_from, valid_until = _next_valid_window(now)
     remaining_seconds = max(int((valid_until - now).total_seconds()), 0)
 
