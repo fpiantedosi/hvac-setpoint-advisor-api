@@ -35,6 +35,17 @@ for _name, _value in {
     "cooling_load_high_4h_kwh": 6200.0,
     "heating_load_low_4h_smc": 350.0,
     "heating_load_high_4h_smc": 1300.0,
+    # Variable/cascade-aware saving representation. These defaults are used only
+    # if config.py has not yet been updated. Values are deliberately conservative:
+    # they introduce load-dependent variability and a modest cascade opportunity
+    # without claiming a full fixed chiller is always avoided.
+    "cooling_variable_saving_min_factor": 0.55,
+    "cooling_variable_saving_max_factor": 1.15,
+    "cooling_stage_bonus_max_fraction": 0.45,
+    "cooling_stage_thresholds_4h_kwh": (2200.0, 3800.0, 5400.0, 7000.0, 8600.0),
+    "cooling_stage_opportunity_window_kwh": 650.0,
+    "heating_variable_saving_min_factor": 0.65,
+    "heating_variable_saving_max_factor": 1.05,
     "weight_energy": 1.40,
     "weight_comfort": 0.60,
     "weight_stability": 0.10,
@@ -143,6 +154,133 @@ def _max_phase1_saving(regime: str) -> float:
     if regime == "heating":
         min_candidate = min(settings.heating_candidates)
         return max(heating_saving_smc(min_candidate, settings.control_interval_h), 1.0)
+    return 1.0
+
+
+
+def _cooling_cascade_opportunity(baseline_energy_4h: float, active_count_avg: float | None = None) -> float:
+    """Opportunity score in [0, 1] for avoiding/shortening a cascade stage.
+
+    The first chiller is assumed to be variable/part-load. Additional stages are
+    treated as quasi-fixed blocks: the closer the 4h baseline is just above an
+    estimated staging threshold, the higher the opportunity that a small load
+    reduction shortens or avoids one staged unit. This is a representation model
+    for the advisor, not a certified plant-sequencing reconstruction.
+    """
+    thresholds = tuple(getattr(settings, "cooling_stage_thresholds_4h_kwh", (2200.0, 3800.0, 5400.0, 7000.0, 8600.0)))
+    window = float(getattr(settings, "cooling_stage_opportunity_window_kwh", 650.0))
+    if window <= 1e-9:
+        return 0.0
+
+    opportunity = 0.0
+    for thr in thresholds:
+        # Only if we are above a threshold can a reduction plausibly shorten or
+        # avoid the stage. Opportunity fades as the load moves far above it.
+        if baseline_energy_4h >= thr:
+            distance = baseline_energy_4h - thr
+            opportunity = max(opportunity, 1.0 - min(distance / window, 1.0))
+
+    # Active count, when available, is an additional sanity check: if the profile
+    # says only one group is active, cascade-stage opportunity should be limited.
+    if active_count_avg is not None:
+        try:
+            ac = float(active_count_avg)
+            if ac < 1.5:
+                opportunity *= 0.35
+            elif ac < 2.2:
+                opportunity *= 0.75
+        except Exception:
+            pass
+    return round(_clamp(opportunity), 4)
+
+
+def _cooling_dynamic_saving_kwh(candidate: float, hours: int, baseline_energy_4h: float, baseline: Dict[str, Any]) -> Tuple[float, Dict[str, Any]]:
+    """Cooling saving with variable first-stage and cascade-aware modulation.
+
+    Previous implementation returned a constant physical value for a given
+    setpoint delta: K * delta / EER * hours. That is safe but visually and
+    operationally too flat. This version keeps the same physical core and adds:
+      1) part-load modulation for the variable first stage;
+      2) a modest cascade opportunity factor near staging thresholds.
+    """
+    base = max(cooling_saving_kwh(candidate, hours), 0.0)
+    if base <= 0:
+        return 0.0, {
+            "saving_model": "cascade_variable",
+            "base_physical_saving_kwh": 0.0,
+            "load_intensity": _load_intensity("cooling", baseline_energy_4h),
+            "variable_stage_factor": 0.0,
+            "cascade_opportunity": 0.0,
+            "cascade_bonus_kwh": 0.0,
+        }
+
+    intensity = _load_intensity("cooling", baseline_energy_4h)
+    f_min = float(getattr(settings, "cooling_variable_saving_min_factor", 0.55))
+    f_max = float(getattr(settings, "cooling_variable_saving_max_factor", 1.15))
+    variable_factor = f_min + (f_max - f_min) * _clamp(intensity)
+
+    active_count_avg = None
+    try:
+        active_count_avg = float(baseline.get("active_chiller_count_avg"))
+    except Exception:
+        pass
+    opportunity = _cooling_cascade_opportunity(baseline_energy_4h, active_count_avg)
+    bonus_fraction = float(getattr(settings, "cooling_stage_bonus_max_fraction", 0.45)) * opportunity
+
+    continuous = base * variable_factor
+    cascade_bonus = continuous * bonus_fraction
+    total = continuous + cascade_bonus
+
+    # Hard guardrail: the advisor cannot claim that the controllable 11 UTA save
+    # an implausibly large fraction of the whole central-plant 4h baseline.
+    total = min(total, max(baseline_energy_4h * 0.18, 0.0))
+
+    meta = {
+        "saving_model": "cascade_variable",
+        "base_physical_saving_kwh": round(base, 2),
+        "load_intensity": round(intensity, 4),
+        "variable_stage_factor": round(variable_factor, 4),
+        "cascade_opportunity": round(opportunity, 4),
+        "cascade_bonus_kwh": round(cascade_bonus, 2),
+        "active_chiller_count_avg": round(active_count_avg, 2) if active_count_avg is not None else None,
+    }
+    return round(max(total, 0.0), 2), meta
+
+
+def _heating_dynamic_saving_smc(candidate: float, hours: int, baseline_energy_4h: float) -> Tuple[float, Dict[str, Any]]:
+    """Heating saving with a mild load-dependent modulation.
+
+    This keeps gas estimates from being completely flat while avoiding any claim
+    about a boiler cascade that we have not yet characterized.
+    """
+    base = max(heating_saving_smc(candidate, hours), 0.0)
+    if base <= 0:
+        return 0.0, {
+            "saving_model": "load_modulated",
+            "base_physical_saving_smc": 0.0,
+            "load_intensity": _load_intensity("heating", baseline_energy_4h),
+            "variable_stage_factor": 0.0,
+        }
+    intensity = _load_intensity("heating", baseline_energy_4h)
+    f_min = float(getattr(settings, "heating_variable_saving_min_factor", 0.65))
+    f_max = float(getattr(settings, "heating_variable_saving_max_factor", 1.05))
+    factor = f_min + (f_max - f_min) * _clamp(intensity)
+    total = min(base * factor, max(baseline_energy_4h * 0.18, 0.0))
+    return round(max(total, 0.0), 2), {
+        "saving_model": "load_modulated",
+        "base_physical_saving_smc": round(base, 2),
+        "load_intensity": round(intensity, 4),
+        "variable_stage_factor": round(factor, 4),
+    }
+
+
+def _dynamic_max_phase1_saving(regime: str, baseline_energy_4h: float, baseline: Dict[str, Any]) -> float:
+    if regime == "cooling":
+        vals = [_cooling_dynamic_saving_kwh(float(c), settings.control_interval_h, baseline_energy_4h, baseline)[0] for c in settings.cooling_candidates]
+        return max(max(vals), 1.0)
+    if regime == "heating":
+        vals = [_heating_dynamic_saving_smc(float(c), settings.control_interval_h, baseline_energy_4h)[0] for c in settings.heating_candidates]
+        return max(max(vals), 1.0)
     return 1.0
 
 
@@ -429,22 +567,25 @@ def evaluate_candidate(
     temp_penalty_raw = temperature_violation_score(temp_forecast, regime)
     temp_penalty = min(temp_penalty_raw, 9.0)
 
+    saving_meta: Dict[str, Any] = {}
     if regime == "cooling":
         baseline_energy = float(baseline["chiller_next_4h_kwh"])
-        saving = max(cooling_saving_kwh(candidate, settings.control_interval_h), 0.0)
+        saving, saving_meta = _cooling_dynamic_saving_kwh(candidate, settings.control_interval_h, baseline_energy, baseline)
         optimized = max(baseline_energy - saving, 0.0)
-        load_intensity = _load_intensity(regime, baseline_energy)
-        energy_gain_score = _normalize_positive(saving, _max_phase1_saving(regime)) * load_intensity
+        load_intensity = float(saving_meta.get("load_intensity", _load_intensity(regime, baseline_energy)))
+        # Normalize against the best dynamic saving available in this same slot;
+        # keep a mild load factor so low-load hours remain conservative.
+        energy_gain_score = _normalize_positive(saving, _dynamic_max_phase1_saving(regime, baseline_energy, baseline)) * (0.70 + 0.30 * _clamp(load_intensity))
         saving_smc = None
         saving_kwh_gas = None
         unit = "kWh"
     elif regime == "heating":
         baseline_energy = float(baseline["gas_next_4h_smc"])
-        saving_smc = max(heating_saving_smc(candidate, settings.control_interval_h), 0.0)
+        saving_smc, saving_meta = _heating_dynamic_saving_smc(candidate, settings.control_interval_h, baseline_energy)
         saving = saving_smc
         optimized = max(baseline_energy - saving_smc, 0.0)
-        load_intensity = _load_intensity(regime, baseline_energy)
-        energy_gain_score = _normalize_positive(saving_smc, _max_phase1_saving(regime)) * load_intensity
+        load_intensity = float(saving_meta.get("load_intensity", _load_intensity(regime, baseline_energy)))
+        energy_gain_score = _normalize_positive(saving_smc, _dynamic_max_phase1_saving(regime, baseline_energy, baseline)) * (0.70 + 0.30 * _clamp(load_intensity))
         saving_kwh_gas = smc_to_kwh_gas(saving_smc)
         unit = "Smc"
     else:
@@ -487,6 +628,12 @@ def evaluate_candidate(
         "saving_unit": unit,
         "energy_score": round(energy_gain_score, 4),
         "load_intensity": round(load_intensity, 4),
+        "saving_model": saving_meta.get("saving_model"),
+        "base_physical_saving": saving_meta.get("base_physical_saving_kwh", saving_meta.get("base_physical_saving_smc")),
+        "variable_stage_factor": saving_meta.get("variable_stage_factor"),
+        "cascade_opportunity": saving_meta.get("cascade_opportunity"),
+        "cascade_bonus_kwh": saving_meta.get("cascade_bonus_kwh"),
+        "active_chiller_count_avg": saving_meta.get("active_chiller_count_avg"),
         "comfort_penalty": round(comfort, 4),
         "stability_penalty": round(stability, 4),
         "process_penalty": round(process, 4),
