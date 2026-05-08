@@ -54,6 +54,21 @@ class Settings:
     gas_kwh_per_smc: float = 10.69
     eta_caldaia: float = 0.90
 
+    # Weather-aware regime selection
+    # The advisor must not rely only on the calendar month. A cold day in a
+    # nominal cooling month must be treated as heating or neutral, otherwise the
+    # interface becomes physically inconsistent.
+    dynamic_regime_enabled: bool = True
+    heating_activation_outdoor_c: float = 16.5
+    cooling_activation_outdoor_c: float = 23.0
+    heating_season_max_outdoor_c: float = 19.0
+    cooling_season_min_outdoor_c: float = 18.5
+    # Dehumidification is not exposed as an independent mode until internal RH or
+    # latent-load measurements are available. These thresholds only keep cooling
+    # active in humid shoulder conditions.
+    dehumidification_dewpoint_c: float = 18.5
+    dehumidification_rh_pct: float = 72.0
+
     # Thermal simulator parameters
     tau_env_h: float = 24.0
     tau_hvac_h: float = 8.0

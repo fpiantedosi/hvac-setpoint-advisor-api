@@ -46,6 +46,17 @@ for _name, _value in {
     "cooling_stage_opportunity_window_kwh": 650.0,
     "heating_variable_saving_min_factor": 0.65,
     "heating_variable_saving_max_factor": 1.05,
+    # Dynamic regime selection. The previous implementation used only the month:
+    # in a cold May day it could still classify the plant as cooling. The advisor
+    # must instead use the outdoor forecast/current temperature as the primary
+    # signal, then fall back to the seasonal calendar only when weather is absent.
+    "dynamic_regime_enabled": True,
+    "heating_activation_outdoor_c": 16.5,
+    "cooling_activation_outdoor_c": 23.0,
+    "heating_season_max_outdoor_c": 19.0,
+    "cooling_season_min_outdoor_c": 18.5,
+    "dehumidification_dewpoint_c": 18.5,
+    "dehumidification_rh_pct": 72.0,
     "weight_energy": 1.40,
     "weight_comfort": 0.60,
     "weight_stability": 0.10,
@@ -337,6 +348,96 @@ def _weather_average_temp(rows, start: datetime, hours: int) -> Optional[float]:
     return sum(vals) / len(vals)
 
 
+
+def _weather_average_attr(rows, start: datetime, hours: int, attr: str) -> Optional[float]:
+    """Average a WeatherPoint attribute over a control slot."""
+    if not rows:
+        return None
+    end = start + timedelta(hours=hours)
+    vals = []
+    for p in rows:
+        try:
+            v = getattr(p, attr, None)
+            if v is not None and start <= p.time < end:
+                vals.append(float(v))
+        except Exception:
+            continue
+    if not vals:
+        # fallback to closest point
+        closest = None
+        closest_dt = None
+        for p in rows:
+            try:
+                v = getattr(p, attr, None)
+                if v is None:
+                    continue
+                dist = abs((p.time - start).total_seconds())
+                if closest_dt is None or dist < closest_dt:
+                    closest = float(v)
+                    closest_dt = dist
+            except Exception:
+                continue
+        return closest
+    return sum(vals) / len(vals)
+
+
+def _regime_for_slot(slot_time: datetime, weather_window, force_regime: Optional[str] = None) -> str:
+    """Weather-aware operating regime.
+
+    The original advisor selected the regime only from the calendar month. That is
+    not robust: a cold day in a nominal cooling month can be classified as
+    cooling even when the physically coherent action is heating or neutral. This
+    function uses outdoor weather first, then seasonal fallback.
+
+    Returned values intentionally remain limited to the existing API schema:
+    - "heating": gas/smc model is active;
+    - "cooling": chiller/kWh model is active;
+    - "neutral": no aggressive energy recommendation.
+
+    A future humidity/dehumidification mode should be added only when internal RH
+    or dehumidification demand is available. Until then, high dewpoint in cooling
+    season is treated conservatively as cooling, not as a separate mode.
+    """
+    if force_regime in {"cooling", "heating", "neutral"}:
+        return force_regime
+
+    seasonal = get_regime(slot_time)
+    if not getattr(settings, "dynamic_regime_enabled", True):
+        return seasonal
+
+    avg_ext = _weather_average_temp(weather_window, slot_time, settings.control_interval_h)
+    if avg_ext is None:
+        return seasonal
+
+    avg_dew = _weather_average_attr(weather_window, slot_time, settings.control_interval_h, "dewpoint_c")
+    avg_rh = _weather_average_attr(weather_window, slot_time, settings.control_interval_h, "rh_pct")
+
+    # Primary weather thresholds. These override the month.
+    if avg_ext <= float(getattr(settings, "heating_activation_outdoor_c", 16.5)):
+        return "heating"
+    if avg_ext >= float(getattr(settings, "cooling_activation_outdoor_c", 23.0)):
+        return "cooling"
+
+    # Calendar-assisted fallback for shoulder conditions.
+    if seasonal == "heating" and avg_ext <= float(getattr(settings, "heating_season_max_outdoor_c", 19.0)):
+        return "heating"
+
+    if seasonal == "cooling" and avg_ext >= float(getattr(settings, "cooling_season_min_outdoor_c", 18.5)):
+        # Without internal humidity we cannot claim an explicit dehumidification
+        # control mode. If outdoor humidity/dewpoint is high, we keep cooling as
+        # the safest label for latent-load related operation.
+        if avg_dew is not None and avg_dew >= float(getattr(settings, "dehumidification_dewpoint_c", 18.5)):
+            return "cooling"
+        if avg_rh is not None and avg_rh >= float(getattr(settings, "dehumidification_rh_pct", 72.0)):
+            return "cooling"
+        # Mild cooling-season day: cooling is only selected if it is plausibly
+        # needed by internal loads; otherwise remain neutral.
+        if avg_ext >= 20.5:
+            return "cooling"
+
+    return "neutral"
+
+
 def _baseline_energy_for_slot(slot_time: datetime, regime: str, weather_window) -> float:
     """Predicted 4h central-plant baseline for a slot.
 
@@ -437,7 +538,7 @@ def _build_display_setpoint_history(
     prev_regime: Optional[str] = None
 
     for slot in slots:
-        regime = force_regime if slot == slots[-1] and force_regime else get_regime(slot)
+        regime = _regime_for_slot(slot, weather_window, force_regime if slot == slots[-1] else None)
         nominal = nominal_setpoint(regime)
         if prev is None or prev_regime != regime:
             prev = nominal
@@ -741,7 +842,7 @@ def _build_reconstructed_history(
     current_input_temp: Optional[float] = None
 
     for slot in slots:
-        slot_regime = force_regime if slot == valid_from and force_regime else get_regime(slot)
+        slot_regime = _regime_for_slot(slot, weather_window, force_regime if slot == valid_from else None)
         nominal = nominal_setpoint(slot_regime)
 
         if previous_setpoint is None or previous_regime != slot_regime:
